@@ -1,102 +1,95 @@
-name: Docker CI/CD Pipleine
+name: Docker CI/CD Pipeline
 
 on:
   push:
-    branches: [main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
-
+    branches: [main, master]
 
 env:
   DOCKER_IMAGE_NAME: docker-cicd-demo
   DOCKER_REGISTRY: docker.io
 
-
 jobs:
   build-and-test:
-    runs-on:  ubuntu:latest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  - name: Checkout repository
-    uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
 
-  - name: Set up Node.js
-    uses: actions/setup-node@v4
-    with:
-      node-version: '18'
-      cache: 'npm'
+      - name: Install dependencies
+        run: npm install
 
-  - name: Install dependencies
-    run: npm install
+      - name: Run tests
+        run: |
+          npm start &
+          APP_PID=$!
+          
+          sleep 5
+          
+          npm test
+          
+          kill $APP_PID
 
-  - name: RUn tests
-    run: | 
-      npm start &
-      APP_PID=$!
+      - name: Set up Docker buildx
+        uses: docker/setup-buildx-action@v3
 
-      sleep 5
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ${{ env.DOCKER_IMAGE_NAME }}:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      npm test
+      - name: Test Docker image
+        run: |
+          docker run -d -p 3000:3000 --name test-container ${{ env.DOCKER_IMAGE_NAME }}:test
+          
+          sleep 10
+          
+          curl -f http://localhost:3000/health || exit 1
+          
+          docker stop test-container
+          docker rm test-container
 
-      kill $APP_PID
+  build-and-push:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-   - name: Set up Docker buildx
-     uses: docker/setup-buildx-action@v3
+      - name: Login to Docker Hub 
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-   - name: Build Docker image
-     uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: false
-        tags: ${{ env.DOCKER_IMAGE_NAME }}:test
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          image: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}
+          tags: | 
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
 
-    - name: Test Docker image
-      run: |
-        docker run -d -p 3000:3000 --name test-container ${{ env.DOCKER_IMAGE_NAME }}:test
-
-        sleep 10
-
-        curl -f http://localhost:3000/health || exit 1
-        docker stop test-container
-        docker rm test-container
-
-      build-and-push:
-        needs: build-and-test
-        runs-on: ubuntu-latest
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-
-        steps:
-        - name: Checkout repository
-          uses: actions/checkout@v4
-
-        - name: Login to Docker Hub 
-          uses: docker/login-action@v3
-
-          with:
-            username: ${{ secrets.DOCKER_USERNAME }}
-            passowrd: ${{ secrets.DOCKER_PASSWORD }}
-
-        - name: Extract metadata
-          id: meta
-          uses: docker/metadata-action@v5
-          with:
-            image: ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}
-            tags: | 
-              type=ref,event=branch
-              type=sha,prefix={{branch}}-
-              type=raw,value=latest,enable={{is_default_branch}}
-
-        - name: Build and push Docker image
-          uses: docker/build-push-action@v5
-          with:
-            context: .
-            push: true
-            tags: ${{ steps.meta.outputs.tags }}
-            labels: ${{ steps.meta.outputs.labels }}
-            cache-from: type=gha
-            cache-to: type=gha,mode=max
-
-
-
-
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
